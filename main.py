@@ -8,7 +8,7 @@ from tensorflow.keras.preprocessing.sequence import pad_sequences
 import numpy as np
 import matplotlib.pyplot as plt
 import math
-
+import pickle
 
 vocab_size = 10000
 embedding_dim = 16
@@ -55,78 +55,20 @@ def remove_emojis(data):
     return re.sub(emoj, "", data)
 
 
-def decode_sentence(text):
-    return " ".join([reverse_word_index.get(i, "?") for i in text])
-
-
 def get_cleared_sentences(data):
     return [remove_emojis(d) for d in data]
 
 
-def get_data(test=False, size=10_000):
-    filter_query = dict()
-    if test:
-        filter_query["bool"] = {
-            "must": [
-                {
-                    "match": {
-                        "lang": "pl",
-                    },
-                },
-                {
-                    "match": {
-                        "is_retweet": False,
-                    },
-                },
-            ],
-            "must_not": [
-                {
-                    "match": {
-                        "is_hate_speech": True,
-                    },
-                },
-                {
-                    "match": {
-                        "is_hate_speech": False,
-                    },
-                },
-            ],
-        }
-    else:
-        filter_query["bool"] = {
-            "must": [
-                {
-                    "match": {
-                        "lang": "pl",
-                    },
-                },
-                {
-                    "match": {
-                        "is_retweet": False,
-                    },
-                },
-            ],
-            "should": [
-                {
-                    "match": {
-                        "is_hate_speech": True,
-                    },
-                },
-                {
-                    "match": {
-                        "is_hate_speech": False,
-                    },
-                },
-            ],
-        }
-
+def get_hate_speech(is_hate_speech=True, size=10000):
     url = "https://es.dc9.dev:9200/tweets/_search"
     headers = {"content-type": "application/json"}
     query = {
         "size": size,
-        "_source": ["content", "is_hate_speech"],
         "query": {
-            "function_score": {"random_score": {}, "query": filter_query},
+            "function_score": {
+                "query": {"match": {"is_hate_speech": is_hate_speech}},
+                "functions": [{"random_score": {}}],
+            }
         },
     }
 
@@ -140,36 +82,35 @@ def get_data(test=False, size=10_000):
 
 
 def main():
-    raw_data = get_data(test=False, size=10_000)
+    raw_data = get_hate_speech(is_hate_speech=False, size=10_000)
     data = []
-
     for item in raw_data:
         if "is_hate_speech" not in item["_source"]:
             continue
+        data.append(item["_source"])
 
-    mid_data_point = math.floor(len(data) / 2)
-    training_sentences = []
-    testing_sentences = []
-    training_labels = []
-    testing_labels = []
+    raw_data = get_hate_speech(is_hate_speech=True, size=10_000)
+    for item in raw_data:
+        if "is_hate_speech" not in item["_source"]:
+            continue
+        data.append(item["_source"])
 
-    for item in data[0:mid_data_point]:
-        if (
-            item["_source"]["is_hate_speech"] is True
-            or item["_source"]["is_hate_speech"] is False
-        ):
-            training_sentences.append(item["_source"]["content"])
-            training_labels.append(item["_source"]["is_hate_speech"])
-    training_sentences = get_cleared_sentences(training_sentences)
+    sentences = []
+    labels = []
 
-    for item in data[mid_data_point:]:
-        if (
-            item["_source"]["is_hate_speech"] is True
-            or item["_source"]["is_hate_speech"] is False
-        ):
-            testing_sentences.append(item["_source"]["content"])
-            testing_labels.append(item["_source"]["is_hate_speech"])
-    testing_sentences = get_cleared_sentences(training_sentences)
+    for item in data:
+        if item["is_hate_speech"] is True or item["is_hate_speech"] is False:
+            sentences.append(item["content"])
+            labels.append(item["is_hate_speech"])
+        else:
+            print(item["is_hate_speech"])
+    sentences = get_cleared_sentences(sentences)
+
+    mid_data_point = math.floor(len(sentences) * 0.8)
+    training_sentences = sentences[0:mid_data_point]
+    testing_sentences = sentences[mid_data_point:]
+    training_labels = labels[0:mid_data_point]
+    testing_labels = labels[mid_data_point:]
 
     tokenizer = Tokenizer(num_words=vocab_size, oov_token=oov_tok)
     tokenizer.fit_on_texts(training_sentences)
@@ -206,7 +147,12 @@ def main():
             tf.keras.layers.Dense(1, activation="sigmoid"),
         ]
     )
-    model.compile(loss="binary_crossentropy", optimizer="adam", metrics=["accuracy"], run_eagerly=True)
+    model.compile(
+        loss="binary_crossentropy",
+        optimizer="adam",
+        metrics=["accuracy"],
+        run_eagerly=True,
+    )
 
     model.summary()
 
@@ -218,17 +164,19 @@ def main():
         validation_data=(testing_padded, testing_labels),
         verbose=2,
     )
+    model.evaluate(testing_padded, testing_labels)
+    model.save("hate_speech_model")
 
-    return
-
-    plot_graphs(history, "accuracy")
-    plot_graphs(history, "loss")
-
-    reverse_word_index = dict([(value, key) for (key, value) in word_index.items()])
-
-    print(decode_sentence(training_padded[0]))
-    print(training_sentences[2])
-    print(training_labels[2])
+    # saving tokenizer
+    with open('tokenizer.pickle', 'wb') as handle:
+        pickle.dump(tokenizer, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    
+    # sentence = ["Wypierdalaj do siebie pejsata mendo", "Lubię pierogi"]
+    # sequences = tokenizer.texts_to_sequences(sentence)
+    # padded = pad_sequences(
+    #     sequences, maxlen=max_length, padding=padding_type, truncating=trunc_type
+    # )
+    # print(model.predict(padded))
 
 
 if __name__ == "__main__":
